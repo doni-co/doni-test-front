@@ -13,6 +13,18 @@ from streamlit_flow.state import StreamlitFlowState
 
 API = "http://localhost:8000"
 KO = {"standardize_data": "데이터 표준화", "clean_text": "문자 정리", "filter": "필터"}
+# 추출 노드는 mediaset(비정형 원본) 전용이라 "데이터 변환"과 메뉴를 분리한다.
+# kind는 백엔드 registry.py가 등록한 정식 이름 그대로 보낸다(alias는 없앴다).
+EXTRACT_KO = {
+    "extract_text_from_pdf": "PDF에서 텍스트 추출",
+    "extract_text_from_image": "이미지에서 텍스트 추출",
+    "extract_json_from_excel": "엑셀에서 텍스트 추출",
+}
+EXTRACT_EXTS = {  # extract_ops.py의 _check_ext와 맞춘 허용 확장자
+    "extract_text_from_pdf": (".pdf",),
+    "extract_text_from_image": (".png", ".jpg", ".jpeg"),
+    "extract_json_from_excel": (".xlsx", ".xls"),
+}
 EXT_ICON = {"pdf": "📕", "xlsx": "📗", "xls": "📗", "csv": "📊", "pptx": "📙", "hwp": "📘",
             "jpg": "🖼️", "jpeg": "🖼️", "png": "🖼️"}
 OPS = ["eq", "ne", "gt", "gte", "lt", "lte", "in", "not_in", "contains", "starts_with", "ends_with",
@@ -125,6 +137,38 @@ def form(kind, node_id, aid):
             st.error(str(e))
 
 
+def extract_form(kind, node_id):
+    """PDF/이미지/엑셀 추출 노드의 설정 입력. 입력이 mediaset이라 asset_rows(컬럼)는 안 쓴다."""
+    if kind == "extract_json_from_excel":
+        sheet_name = st.text_input("시트 이름 (비우면 전체 시트)")
+        params = {"sheet_name": sheet_name or None}
+    else:
+        on_error = st.radio("추출 실패 시", ["fail", "skip"], horizontal=True,
+                            format_func=lambda x: {"fail": "노드를 실패 처리", "skip": "그 파일만 실패로 남기고 계속"}[x])
+        params = {"on_error": on_error}
+        if kind == "extract_text_from_pdf":
+            c1, c2 = st.columns(2)
+            start_page = c1.number_input("시작 페이지", min_value=1, value=1, step=1)
+            end_page = c2.number_input("끝 페이지 (0=끝까지)", min_value=0, value=0, step=1)
+            params["start_page"] = int(start_page)
+            params["end_page"] = int(end_page) or None
+
+    if st.button("실행", type="primary", key=f"run_{kind}_{node_id}"):
+        try:
+            res = call("POST", "/pipelines/nodes/transform",
+                       json={"input_node_id": node_id, "kind": kind, "params": params})
+            nid = res["node"]["id"]
+            with st.spinner("실행 중..."):
+                for _ in range(30):  # 최대 30초 폴링 (추출은 외부 AI 서버를 타서 조금 더 걸릴 수 있다)
+                    if call("GET", f"/pipelines/nodes/{nid}/runs/latest")["status"] in ("succeeded", "failed"):
+                        break
+                    time.sleep(1)
+            st.session_state.sel = nid
+            st.rerun()
+        except RuntimeError as e:
+            st.error(str(e))
+
+
 def node_view(n, run, selected):
     """(markdown 내용, 스타일). 그림처럼 아이콘+제목 / 아래 회색 부제."""
     if n["kind"] == "source":
@@ -133,7 +177,7 @@ def node_view(n, run, selected):
         title, sub, icon = a["name"], ext.upper() or "FILE", EXT_ICON.get(ext, "📄")
     else:
         status = run["status"] if run else "pending"
-        icon, title = "🔗", KO.get(n["kind"], n["kind"])
+        icon, title = "🔗", KO.get(n["kind"]) or EXTRACT_KO.get(n["kind"], n["kind"])
         if status == "succeeded":
             sub = f"{asset_info(run['output_ref']).get('row_count')}행"
         else:
@@ -211,6 +255,23 @@ with st.sidebar:
                 st.warning("이 노드는 아직 결과가 없어요.")
             else:
                 st.dialog(label)(form)(k, sel_node["id"], aid)
+
+    st.markdown(":orange[📤] **데이터 추출**")
+    sel_ext = ("." + asset_info(sel_node["source_asset_id"])["ext"].lower()
+               if sel_node and sel_node["kind"] == "source" and asset_info(sel_node["source_asset_id"]).get("ext")
+               else None)
+    for k, label in EXTRACT_KO.items():
+        if q and q not in label:
+            continue
+        if st.button(label, key=f"menu_{k}", use_container_width=True):
+            if not sel_node:
+                st.warning("먼저 오른쪽 네모를 선택하세요.")
+            elif sel_node["kind"] != "source":
+                st.warning("추출은 업로드한 원본 파일(네모) 노드에서만 할 수 있어요.")
+            elif sel_ext not in EXTRACT_EXTS[k]:
+                st.warning(f"이 메뉴는 {'/'.join(e.lstrip('.') for e in EXTRACT_EXTS[k])} 파일에서만 쓸 수 있어요.")
+            else:
+                st.dialog(label)(extract_form)(k, sel_node["id"])
     st.caption(f"pipeline id: {pid}")
 
 # ---- 오른쪽 캔버스 ----
