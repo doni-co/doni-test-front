@@ -16,7 +16,7 @@ pip install "streamlit>=1.37" requests streamlit-flow-component
 ### 3. 애플리케이션 실행
 
 ```bash
-streamlit run app_ui_flow.py
+streamlit run app_ui.py
 ```
 
 실행 후 터미널에 표시되는 로컬 URL로 접속합니다.
